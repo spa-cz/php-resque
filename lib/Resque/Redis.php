@@ -93,6 +93,11 @@ class Resque_Redis
 	// renamenx
 
 	/**
+	 * @var Credis_Client
+	 */
+	public $driver;
+
+	/**
 	 * Set Redis namespace (prefix) default: resque
 	 * @param string $namespace
 	 */

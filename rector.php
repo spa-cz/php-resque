@@ -12,6 +12,7 @@ use Rector\Php82\Rector\Encapsed\VariableInStringInterpolationFixerRector;
 use Rector\Php84\Rector\Param\ExplicitNullableParamTypeRector;
 
 // Code Quality / Style
+use Rector\CodeQuality\Rector\Class_\CompleteDynamicPropertiesRector;
 use Rector\CodingStyle\Rector\FuncCall\ConsistentImplodeRector;
 
 // Migrate rules one at a time
@@ -24,6 +25,7 @@ $rules = [
     ExplicitNullableParamTypeRector::class,
 
     // Code Quality / Style
+    CompleteDynamicPropertiesRector::class,
     ConsistentImplodeRector::class,
 ];
 

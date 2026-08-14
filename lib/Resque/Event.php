@@ -35,7 +35,10 @@ class Resque_Event
 			if (!is_callable($callback)) {
 				continue;
 			}
-			call_user_func_array($callback, $data);
+			// Since PHP 8.0, call_user_func_array() treats string keys in $data as
+			// named arguments. Historically these were always passed positionally,
+			// so strip the keys to preserve that behaviour.
+			call_user_func_array($callback, array_values($data));
 		}
 
 		return true;

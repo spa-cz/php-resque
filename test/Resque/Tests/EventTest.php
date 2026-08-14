@@ -8,9 +8,14 @@
  */
 class Resque_Tests_EventTest extends Resque_Tests_TestCase
 {
+	/**
+	 * @var \Resque_Worker
+	 */
+	protected $worker;
+
 	private $callbacksHit = array();
 
-	public function setUp()
+	public function setUp(): void
 	{
 		Test_Job::$called = false;
 
@@ -23,7 +28,7 @@ class Resque_Tests_EventTest extends Resque_Tests_TestCase
 		$this->worker->registerWorker();
 	}
 
-	public function tearDown()
+	public function tearDown(): void
 	{
 		Resque_Event::clearListeners();
 		$this->callbacksHit = array();

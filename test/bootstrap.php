@@ -86,6 +86,9 @@ if(function_exists('pcntl_signal')) {
 	pcntl_signal(SIGTERM, 'sigint');
 }
 
+// Resque_Job_Factory assigns $args/$queue/$job onto job instances it doesn't own,
+// so our own test job classes need to opt back in to dynamic properties (PHP 8.2+).
+#[AllowDynamicProperties]
 class Test_Job
 {
 	public static $called = false;
@@ -101,6 +104,7 @@ class Failing_Job_Exception extends Exception
 
 }
 
+#[AllowDynamicProperties]
 class Failing_Job
 {
 	public function perform()
@@ -115,6 +119,7 @@ class Failing_Job
  *
  * CAUTION Use this test job only with Worker::work, i.e. only when you actually trigger the fork in tests.
  */
+#[AllowDynamicProperties]
 class InProgress_Job
 {
 	public function perform()
@@ -132,6 +137,7 @@ class Test_Job_Without_Perform_Method
 
 }
 
+#[AllowDynamicProperties]
 class Test_Job_With_SetUp
 {
 	public static $called = false;
@@ -149,6 +155,7 @@ class Test_Job_With_SetUp
 }
 
 
+#[AllowDynamicProperties]
 class Test_Job_With_TearDown
 {
 	public static $called = false;
@@ -165,6 +172,7 @@ class Test_Job_With_TearDown
 	}
 }
 
+#[AllowDynamicProperties]
 class Test_Infinite_Recursion_Job
 {
     public function perform()

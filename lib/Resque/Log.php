@@ -22,14 +22,13 @@ class Resque_Log extends Psr\Log\AbstractLogger
 	 * @param mixed   $level    PSR-3 log level constant, or equivalent string
 	 * @param string  $message  Message to log, may contain a { placeholder }
 	 * @param array   $context  Variables to replace { placeholder }
-	 * @return null
 	 */
-	public function log($level, $message, array $context = array())
+	public function log($level, $message, array $context = array()): void
 	{
 		if ($this->verbose) {
 			fwrite(
 				STDOUT,
-				'[' . $level . '] [' . strftime('%T %Y-%m-%d') . '] ' . $this->interpolate($message, $context) . PHP_EOL
+				'[' . $level . '] [' . date('H:i:s Y-m-d') . '] ' . $this->interpolate($message, $context) . PHP_EOL
 			);
 			return;
 		}

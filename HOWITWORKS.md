@@ -154,8 +154,6 @@ How do the workers process the queues?
         20. `Resque_Job_PID()` is removed, the forked process will terminate soon
             cleanly
         21. `Resque_Worker::work()` calls `exit(0)` to terminate the job process
-    -   SPECIAL CASE: Non-forking OS (Windows)
-        1.  Same as the job above, except it doesn't call `exit(0)` when done
     7.  `Resque_Worker::work()` calls `Resque_Worker->doneWorking()` with no
         arguments
     8.  `Resque_Worker->doneWorking()` increments two processed counters in

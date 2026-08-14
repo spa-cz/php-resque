@@ -167,9 +167,7 @@ class Resque_Worker
 		$this->updateProcLine('Starting');
 		$this->startup();
 
-		if (function_exists('pcntl_signal_dispatch')) {
-			pcntl_signal_dispatch();
-		}
+		pcntl_signal_dispatch();
 
 		while (true) {
 			if ($this->shutdown) {
@@ -228,8 +226,8 @@ class Resque_Worker
 
 			$this->child = Resque::fork();
 
-			// Forked and we're the child. Or PCNTL is not installed. Run the job.
-			if ($this->child === 0 || $this->child === false || $this->child === -1) {
+			// Forked and we're the child. Run the job.
+			if ($this->child === 0) {
 				$status = 'Processing ' . $job->queue . ' since ' . date('Y-m-d H:i:s');
 				$this->updateProcLine($status);
 				$this->logger->log(Psr\Log\LogLevel::INFO, $status);
@@ -257,9 +255,7 @@ class Resque_Worker
 
 				// Wait until the child process finishes before continuing
 				while (pcntl_wait($status, WNOHANG) === 0) {
-					if (function_exists('pcntl_signal_dispatch')) {
-						pcntl_signal_dispatch();
-					}
+					pcntl_signal_dispatch();
 
 					// Pause for a half a second to conserve system resources
 					usleep(500000);
@@ -413,10 +409,6 @@ class Resque_Worker
 	 */
 	private function registerSigHandlers()
 	{
-		if (!function_exists('pcntl_signal')) {
-			return;
-		}
-
 		pcntl_signal(SIGTERM, array($this, 'shutDownNow'));
 		pcntl_signal(SIGINT, array($this, 'shutDownNow'));
 		pcntl_signal(SIGQUIT, array($this, 'shutdown'));

@@ -75,16 +75,14 @@ function killRedis($pid)
 }
 register_shutdown_function('killRedis', getmypid());
 
-if(function_exists('pcntl_signal')) {
-	// Override INT and TERM signals, so they do a clean shutdown and also
-	// clean up redis-server as well.
-	function sigint()
-	{
-	 	exit;
-	}
-	pcntl_signal(SIGINT, 'sigint');
-	pcntl_signal(SIGTERM, 'sigint');
+// Override INT and TERM signals, so they do a clean shutdown and also
+// clean up redis-server as well.
+function sigint()
+{
+ 	exit;
 }
+pcntl_signal(SIGINT, 'sigint');
+pcntl_signal(SIGTERM, 'sigint');
 
 // Resque_Job_Factory assigns $args/$queue/$job onto job instances it doesn't own,
 // so our own test job classes need to opt back in to dynamic properties (PHP 8.2+).
@@ -115,7 +113,7 @@ class Failing_Job
 
 /**
  * This job exits the forked worker process, which simulates the job being (forever) in progress,
- * so that we can verify the state of the system for "running jobs". Does not work on a non-forking OS.
+ * so that we can verify the state of the system for "running jobs".
  *
  * CAUTION Use this test job only with Worker::work, i.e. only when you actually trigger the fork in tests.
  */
@@ -124,10 +122,6 @@ class InProgress_Job
 {
 	public function perform()
 	{
-		if(!function_exists('pcntl_fork')) {
-			// We can't lose the worker on a non-forking OS.
-			throw new Failing_Job_Exception('Do not use InProgress_Job for tests on non-forking OS!');
-		}
 		exit(0);
 	}
 }

@@ -29,11 +29,12 @@
 	],
 	"require": {
 		"php": ">=5.6.0",
+		"ext-pcntl": "*",
+		"ext-posix": "*",
 		"colinmollenhour/credis": "~1.7",
 		"psr/log": "^1.0|^2.0|^3.0"
 	},
 	"suggest": {
-		"ext-pcntl": "REQUIRED for forking processes on platforms that support it (so anything but Windows).",
 		"ext-proctitle": "Allows php-resque to rename the title of UNIX processes to show the status of a worker.",
 		"ext-redis": "Native PHP extension for Redis connectivity. Credis will automatically utilize when available."
 	},

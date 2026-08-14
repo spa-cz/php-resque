@@ -213,10 +213,8 @@ calling the `stop()` method on a status class.
 
 ### Obtaining job PID ###
 
-You can obtain the PID of the actual process doing the work through `Resque_Job_PID`. On a forking OS this will be the
-PID of the forked process.
-
-CAUTION: on a non-forking OS, the PID returned will be of the worker itself.
+You can obtain the PID of the actual process doing the work through `Resque_Job_PID`. This will be the PID of the
+forked process.
 
 ```php
 echo Resque_Job_PID::get($token);

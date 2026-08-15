@@ -156,124 +156,138 @@ class Resque_Tests_JobTest extends Resque_Tests_TestCase
 		$this->assertEquals(getcwd(), $newJob->payload['pwd']);
 	}
 
-	public function testResolveCheckoutRootFindsDefaultVendorBinLocation()
+	/**
+	 * Running as this repo's own test suite, resolveCheckoutRoot()'s
+	 * __DIR__-based Composer-root lookup always finds this repo's own root
+	 * (the "root package" candidate - see findComposerRoot()). These tests
+	 * exercise the common-ancestor logic directly against that real,
+	 * verified anchor, using purely synthetic $cwd strings - no real
+	 * directories needed, since findCommonAncestor() is pure string logic.
+	 */
+	public function testResolveCheckoutRootReturnsComposerRootWhenCwdIsInsideIt()
 	{
-		$dir = realpath(sys_get_temp_dir()) . '/resque-resolve-test-' . uniqid();
-		mkdir($dir . '/vendor/bin', 0777, true);
-		touch($dir . '/vendor/bin/resque-run-job');
+		$repoRoot = realpath(__DIR__ . '/../../..');
 
-		$this->assertEquals($dir, Resque_Job::resolveCheckoutRoot($dir));
-
-		$this->rrmdir($dir);
-	}
-
-	public function testResolveCheckoutRootReturnsNullWhenNothingExists()
-	{
-		$dir = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
-
-		$this->assertNull(Resque_Job::resolveCheckoutRoot($dir));
-	}
-
-	public function testResolveCheckoutRootHonoursCustomPath()
-	{
-		$dir = realpath(sys_get_temp_dir()) . '/resque-resolve-test-' . uniqid();
-		mkdir($dir . '/lib/vendor/bin', 0777, true);
-		touch($dir . '/lib/vendor/bin/resque-run-job');
-
-		$this->withRouterScriptPath('lib/vendor/bin/resque-run-job', function () use ($dir) {
-			$this->assertEquals($dir, Resque_Job::resolveCheckoutRoot($dir));
-		});
-
-		$this->rrmdir($dir);
+		$this->assertEquals($repoRoot, Resque_Job::resolveCheckoutRoot($repoRoot));
+		$this->assertEquals($repoRoot, Resque_Job::resolveCheckoutRoot($repoRoot . '/some/nested/path'));
 	}
 
 	/**
-	 * Reproduces the reported bug: a single checkout enqueues jobs from two
-	 * different entry points with two different working directories - a
-	 * PHP-FPM request rooted one level below the checkout (in a "www/"
-	 * subdirectory) and a CLI/cron script rooted at the checkout itself.
-	 * A single static RESQUE_ROUTER_SCRIPT_PATH must resolve both, via the
-	 * bounded upward walk trying each parent directory in turn - and,
-	 * crucially, both resolve to the SAME checkout root.
+	 * Reproduces the reported scenario: Composer lives in a subdirectory of
+	 * the actual checkout (e.g. "lib/"), and the calling process runs from
+	 * a sibling directory (e.g. "app/" or "www/"). Their common ancestor -
+	 * the outer checkout root - is what APP_INCLUDE's conventional paths
+	 * are written relative to.
 	 */
-	public function testResolveCheckoutRootWalksUpwardToFindCheckoutRoot()
+	public function testResolveCheckoutRootReturnsCommonAncestorForSiblingCwd()
 	{
-		$checkoutRoot = realpath(sys_get_temp_dir()) . '/resque-resolve-test-' . uniqid();
-		mkdir($checkoutRoot . '/www', 0777, true);
-		mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
-		touch($checkoutRoot . '/lib/vendor/bin/resque-run-job');
+		$repoRoot = realpath(__DIR__ . '/../../..');
+		$outerRoot = dirname($repoRoot);
+		$siblingCwd = $outerRoot . '/some-sibling-dir/deeper';
 
-		$this->withRouterScriptPath('lib/vendor/bin/resque-run-job', function () use ($checkoutRoot) {
-			// CLI/cron-style dir: matches directly, no upward walk needed.
-			$this->assertEquals($checkoutRoot, Resque_Job::resolveCheckoutRoot($checkoutRoot));
-
-			// PHP-FPM-style dir, one level below the checkout: doesn't
-			// match directly, found one level up via the upward walk - and
-			// the "www/.." is normalized away to the same checkout root.
-			$this->assertEquals(
-				$checkoutRoot,
-				Resque_Job::resolveCheckoutRoot($checkoutRoot . '/www')
-			);
-		});
-
-		$this->rrmdir($checkoutRoot);
+		$this->assertEquals($outerRoot, Resque_Job::resolveCheckoutRoot($siblingCwd));
 	}
 
-	public function testResolveCheckoutRootReturnsNullBeyondSearchDepth()
+	public function testResolveCheckoutRootFallsBackToComposerRootWhenCwdIsUnrelated()
 	{
-		$checkoutRoot = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
-		$tooDeep = $checkoutRoot . str_repeat('/nested', Resque_Job::MAX_ROUTER_SCRIPT_SEARCH_DEPTH + 1);
-		mkdir($tooDeep, 0777, true);
-		mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
-		touch($checkoutRoot . '/lib/vendor/bin/resque-run-job');
+		$repoRoot = realpath(__DIR__ . '/../../..');
 
-		$this->withRouterScriptPath('lib/vendor/bin/resque-run-job', function () use ($tooDeep) {
-			$this->assertNull(Resque_Job::resolveCheckoutRoot($tooDeep));
-		});
-
-		$this->rrmdir($checkoutRoot);
+		// "/" shares only the empty root segment with $repoRoot - climbing
+		// that far exceeds MAX_REPO_ROOT_CLIMB, so the guard should trigger.
+		$this->assertEquals($repoRoot, Resque_Job::resolveCheckoutRoot('/'));
 	}
 
 	/**
-	 * End-to-end: Resque::enqueue() called with no explicit $pwd, from a
-	 * process whose cwd is a "www/" subdirectory of the checkout (simulating
-	 * a PHP-FPM request through /www/index.php), must store the checkout
-	 * ROOT as 'pwd' - not that subdirectory - so Resque_Worker::routeJobToPwd()
-	 * can trust it as-is at routing time.
+	 * findComposerRoot()'s "installed as a normal Composer dependency"
+	 * candidate (5 levels up from __DIR__, checking for
+	 * vendor/bin/resque-run-job) can't be exercised from this repo's own
+	 * test suite - __DIR__ is fixed at compile time to wherever Job.php
+	 * actually lives, which here is always the "root package" depth. This
+	 * requires a fresh subprocess with its own copy of Job.php nested at a
+	 * genuinely different depth. Job.php has no extends/implements/use of
+	 * other Resque classes, so the subprocess only needs a bare require -
+	 * no autoloader, no Redis, no full Resque::enqueue() round trip.
 	 */
-	public function testEnqueueFromSubdirectoryResolvesToCheckoutRoot()
+	public function testResolveCheckoutRootFindsComposerRootWhenInstalledAsDependency()
 	{
-		$checkoutRoot = realpath(sys_get_temp_dir()) . '/resque-resolve-test-' . uniqid();
-		$webDir = $checkoutRoot . '/www';
-		mkdir($webDir, 0777, true);
-		mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
-		touch($checkoutRoot . '/lib/vendor/bin/resque-run-job');
+		$tmp = realpath(sys_get_temp_dir()) . '/resque-dep-test-' . uniqid();
+		mkdir($tmp . '/vendor/resque/php-resque/lib/Resque', 0777, true);
+		mkdir($tmp . '/vendor/bin', 0777, true);
+		copy(__DIR__ . '/../../../lib/Resque/Job.php', $tmp . '/vendor/resque/php-resque/lib/Resque/Job.php');
+		touch($tmp . '/vendor/bin/resque-run-job');
 
-		$originalCwd = getcwd();
-
-		$this->withRouterScriptPath('lib/vendor/bin/resque-run-job', function () use ($checkoutRoot, $webDir, $originalCwd) {
-			try {
-				chdir($webDir);
-				Resque::enqueue('jobs', 'Test_Job');
-			} finally {
-				chdir($originalCwd);
-			}
-		});
-
-		$job = Resque_Job::reserve('jobs');
-		$this->assertEquals($checkoutRoot, $job->payload['pwd']);
-
-		$this->rrmdir($checkoutRoot);
-	}
-
-	private function withRouterScriptPath($value, $callback)
-	{
-		$original = getenv('RESQUE_ROUTER_SCRIPT_PATH');
-		putenv('RESQUE_ROUTER_SCRIPT_PATH=' . $value);
 		try {
-			$callback();
+			// Explicit $cwd = $tmp itself (the "CLI/cron-style" case: cwd is
+			// the checkout root), so this test isolates findComposerRoot()
+			// from the common-ancestor step (covered separately below) - an
+			// unspecified subprocess cwd would otherwise combine with $tmp
+			// unpredictably.
+			$result = $this->runResolveCheckoutRootInSubprocess(
+				$tmp . '/vendor/resque/php-resque/lib/Resque/Job.php',
+				$tmp
+			);
+
+			$this->assertEquals($tmp, $result);
 		} finally {
-			putenv($original === false ? 'RESQUE_ROUTER_SCRIPT_PATH' : 'RESQUE_ROUTER_SCRIPT_PATH=' . $original);
+			$this->rrmdir($tmp);
+		}
+	}
+
+	/**
+	 * The actual web-shaped scenario end to end, combining both mechanisms
+	 * in a real subprocess: Composer nested under "lib/" (found via the
+	 * dependency-install __DIR__ candidate) plus a sibling "app/" cwd
+	 * (found via the common-ancestor step) - together resolving to the
+	 * outer checkout root, not the Composer root.
+	 */
+	public function testResolveCheckoutRootCombinesBothMechanismsForNestedComposerRoot()
+	{
+		$tmp = realpath(sys_get_temp_dir()) . '/resque-dep-test-' . uniqid();
+		mkdir($tmp . '/lib/vendor/resque/php-resque/lib/Resque', 0777, true);
+		mkdir($tmp . '/lib/vendor/bin', 0777, true);
+		mkdir($tmp . '/app', 0777, true);
+		copy(__DIR__ . '/../../../lib/Resque/Job.php', $tmp . '/lib/vendor/resque/php-resque/lib/Resque/Job.php');
+		touch($tmp . '/lib/vendor/bin/resque-run-job');
+
+		try {
+			$result = $this->runResolveCheckoutRootInSubprocess(
+				$tmp . '/lib/vendor/resque/php-resque/lib/Resque/Job.php',
+				$tmp . '/app'
+			);
+
+			$this->assertEquals($tmp, $result);
+		} finally {
+			$this->rrmdir($tmp);
+		}
+	}
+
+	private function runResolveCheckoutRootInSubprocess($jobPhpPath, $cwd = null)
+	{
+		// tempnam() itself creates the file at its returned path - write
+		// there directly rather than appending ".php" to a different,
+		// never-created path (which would leak the original).
+		$runner = tempnam(sys_get_temp_dir(), 'resque-runner-');
+		file_put_contents(
+			$runner,
+			"<?php\n" .
+			"require \$argv[1];\n" .
+			"if (isset(\$argv[2])) {\n" .
+			"    chdir(\$argv[2]);\n" .
+			"}\n" .
+			"echo Resque_Job::resolveCheckoutRoot();\n"
+		);
+
+		try {
+			$command = 'php ' . escapeshellarg($runner) . ' ' . escapeshellarg($jobPhpPath);
+			if ($cwd !== null) {
+				$command .= ' ' . escapeshellarg($cwd);
+			}
+
+			$output = shell_exec($command);
+
+			return trim((string)$output);
+		} finally {
+			unlink($runner);
 		}
 	}
 

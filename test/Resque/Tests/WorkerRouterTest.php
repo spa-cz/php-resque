@@ -107,50 +107,53 @@ class Resque_Tests_WorkerRouterTest extends Resque_Tests_TestCase
     }
 
     /**
-     * Reproduces the reported production bug end to end via a real
-     * pcntl_exec(): a checkout whose router script lives at
-     * lib/vendor/bin/resque-run-job (not the default vendor/bin/...), where
-     * the job gets *scheduled* from a "www/" subdirectory one level below
-     * the checkout root (e.g. a PHP-FPM request through /www/index.php)
-     * rather than the checkout root itself.
+     * Covers the case that motivated storing 'pwd' and 'composerRoot' as
+     * two distinct payload fields: a checkout whose Composer root lives in
+     * a subdirectory (e.g. "lib/", like web's layout), where 'pwd' (the
+     * outer checkout root) and 'composerRoot' (where vendor/bin/ actually
+     * lives) are genuinely different directories.
      *
-     * The fix now lives at schedule time (Resque_Job::create(), via the
-     * bounded upward walk), not routing time - so this test enqueues with
-     * NO explicit $pwd override, chdir()-ing the test process itself into
-     * the "www/" subdirectory first, exactly like a real PHP-FPM request
-     * would. Resque_Worker::routeJobToPwd() then trusts the stored 'pwd'
-     * as-is (plain concatenation, no search) and still routes correctly -
-     * proving resolution genuinely happened at enqueue time, not routing
-     * time.
+     * Auto-*discovering* this split (Resque_Job::resolveCheckoutRoot() /
+     * findComposerRoot(), combining getcwd() with where this library's own
+     * Job.php is installed via __DIR__) is covered directly and precisely
+     * in JobTest.php, including via real subprocesses where __DIR__
+     * genuinely differs - it can't be exercised meaningfully here, since
+     * this test process's own already-loaded Job.php always resolves
+     * against this repo's own real root, not a throwaway checkout. This
+     * test instead passes both $pwd and $composerRoot explicitly (like
+     * testJobWithMismatchedPwdIsRoutedAndRunsFromThatPwd above), to prove
+     * that WHEN they're correctly resolved and stored, routing genuinely
+     * uses each for its own distinct purpose: chdir()s the exec'd process
+     * into 'pwd' (so a conventionally-written, relative APP_INCLUDE
+     * resolves correctly there) while finding the router script under
+     * 'composerRoot' specifically - proven via a real pcntl_exec().
      */
-    public function testJobScheduledFromSubdirectoryIsRoutedToCheckoutRoot()
+    public function testJobWithNestedComposerRootIsRoutedCorrectly()
     {
-        $originalRouterScriptPathEnv = getenv('RESQUE_ROUTER_SCRIPT_PATH');
         $originalAppIncludeEnv = getenv('APP_INCLUDE');
-        $originalCwd = getcwd();
 
-        $checkoutRoot = realpath(sys_get_temp_dir()) . '/resque-router-subdir-test-' . uniqid();
-        $webDir = $checkoutRoot . '/www';
-        mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
-        mkdir($webDir, 0777, true);
+        $checkoutRoot = realpath(sys_get_temp_dir()) . '/resque-router-nested-test-' . uniqid();
+        $composerRoot = $checkoutRoot . '/lib';
+        mkdir($composerRoot . '/vendor/bin', 0777, true);
+
+        copy(__DIR__ . '/../../../bin/resque-run-job', $composerRoot . '/vendor/bin/resque-run-job');
+        chmod($composerRoot . '/vendor/bin/resque-run-job', 0755);
 
         $realAutoload = realpath(__DIR__ . '/../../../vendor/autoload.php');
         file_put_contents(
-            $checkoutRoot . '/lib/vendor/autoload.php',
+            $composerRoot . '/vendor/autoload.php',
             "<?php\nrequire_once " . var_export($realAutoload, true) . ";\n"
         );
 
-        copy(__DIR__ . '/../../../bin/resque-run-job', $checkoutRoot . '/lib/vendor/bin/resque-run-job');
-        chmod($checkoutRoot . '/lib/vendor/bin/resque-run-job', 0755);
-
-        // Routing chdir()s to the stored 'pwd' - now the checkout root, not
-        // "www/" - so APP_INCLUDE lives there too.
+        // Routing chdir()s to 'pwd' (the outer $checkoutRoot), so
+        // APP_INCLUDE - resolved relative to cwd, same as bin/resque -
+        // must live there, not under $composerRoot.
         $marker = $checkoutRoot . '/marker.txt';
         file_put_contents(
             $checkoutRoot . '/bootstrap.php',
             "<?php\n" .
             "#[AllowDynamicProperties]\n" .
-            "class Router_Subdir_Test_Job {\n" .
+            "class Router_Nested_Test_Job {\n" .
             "    public function perform() {\n" .
             "        file_put_contents(\$this->args['marker'], getcwd());\n" .
             "    }\n" .
@@ -158,20 +161,17 @@ class Resque_Tests_WorkerRouterTest extends Resque_Tests_TestCase
         );
 
         putenv('APP_INCLUDE=./bootstrap.php');
-        putenv('RESQUE_ROUTER_SCRIPT_PATH=lib/vendor/bin/resque-run-job');
 
         try {
-            // Simulate a PHP-FPM request rooted in "www/": chdir() there
-            // before enqueuing, with no explicit $pwd override, so
-            // Resque_Job::create() must resolve the checkout root itself.
-            chdir($webDir);
             $token = Resque::enqueue(
                 'router-test-jobs',
-                'Router_Subdir_Test_Job',
+                'Router_Nested_Test_Job',
                 array('marker' => $marker),
-                true
+                true,
+                '',
+                $checkoutRoot,
+                $composerRoot
             );
-            chdir($originalCwd);
 
             $worker = new Resque_Worker('router-test-jobs');
             $worker->setLogger($this->logger);
@@ -183,19 +183,15 @@ class Resque_Tests_WorkerRouterTest extends Resque_Tests_TestCase
             $status = new Resque_Job_Status($token);
             $this->assertEquals(Resque_Job_Status::STATUS_COMPLETE, $status->get());
         } finally {
-            chdir($originalCwd);
-
-            putenv($originalRouterScriptPathEnv === false ? 'RESQUE_ROUTER_SCRIPT_PATH' : 'RESQUE_ROUTER_SCRIPT_PATH=' . $originalRouterScriptPathEnv);
             putenv($originalAppIncludeEnv === false ? 'APP_INCLUDE' : 'APP_INCLUDE=' . $originalAppIncludeEnv);
 
-            @unlink($checkoutRoot . '/lib/vendor/bin/resque-run-job');
-            @unlink($checkoutRoot . '/lib/vendor/autoload.php');
-            @rmdir($checkoutRoot . '/lib/vendor/bin');
-            @rmdir($checkoutRoot . '/lib/vendor');
-            @rmdir($checkoutRoot . '/lib');
+            @unlink($composerRoot . '/vendor/bin/resque-run-job');
+            @unlink($composerRoot . '/vendor/autoload.php');
+            @rmdir($composerRoot . '/vendor/bin');
+            @rmdir($composerRoot . '/vendor');
+            @rmdir($composerRoot);
             @unlink($checkoutRoot . '/bootstrap.php');
             @unlink($checkoutRoot . '/marker.txt');
-            @rmdir($webDir);
             @rmdir($checkoutRoot);
         }
     }

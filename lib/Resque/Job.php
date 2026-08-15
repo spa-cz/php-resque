@@ -55,19 +55,27 @@ class Resque_Job
 	 * @param boolean $monitor Set to true to be able to monitor the status of a job.
 	 * @param string $id Unique identifier for tracking the job. Generated if not supplied.
 	 * @param string $prefix The prefix needs to be set for the status key
-	 * @param string|null $pwd The filesystem root that is enqueuing this job. If not
-	 *        supplied, defaults to resolveCheckoutRoot(getcwd()) - the checkout root
-	 *        found by walking upward from getcwd(), so callers enqueuing from a
+	 * @param string|null $pwd The filesystem root that is enqueuing this job - used
+	 *        for chdir() and as the base APP_INCLUDE's conventional paths are written
+	 *        relative to. If not supplied, defaults to resolveCheckoutRoot() - found
+	 *        with zero configuration by combining where this library itself is
+	 *        installed (via __DIR__) with getcwd() - so callers enqueuing from a
 	 *        subdirectory of the checkout (e.g. a PHP-FPM request rooted in "www/")
 	 *        still get the checkout root stored, not that subdirectory - falling back
-	 *        to plain getcwd() if no checkout root can be found. A router pool
-	 *        re-executes the job in a process rooted here if it differs from the
-	 *        pool's own cwd.
+	 *        to plain getcwd() if no checkout root can be found.
+	 * @param string|null $composerRoot The directory directly containing this
+	 *        checkout's vendor/bin/resque-run-job - used by a router pool to find the
+	 *        script to exec. Distinct from $pwd whenever Composer lives in a
+	 *        subdirectory of the checkout (e.g. "lib/"): $pwd is then the outer
+	 *        checkout root (for chdir()/APP_INCLUDE), while $composerRoot is that
+	 *        subdirectory. If not supplied, defaults to the auto-discovered Composer
+	 *        root when $pwd is also being auto-resolved, or to $pwd itself otherwise
+	 *        (assuming vendor/ sits directly under a caller-supplied $pwd).
 	 *
 	 * @return string
 	 * @throws \InvalidArgumentException
 	 */
-	public static function create($queue, $class, $args = null, $monitor = false, $id = null, $prefix = "", $pwd = null)
+	public static function create($queue, $class, $args = null, $monitor = false, $id = null, $prefix = "", $pwd = null, $composerRoot = null)
 	{
 		if (is_null($id)) {
 			$id = Resque::generateJobId();
@@ -80,20 +88,30 @@ class Resque_Job
 		}
 
 		if ($pwd === null) {
-			$cwd = getcwd();
-			$pwd = self::resolveCheckoutRoot($cwd);
-			if ($pwd === null) {
-				$pwd = $cwd;
+			$foundComposerRoot = self::findComposerRoot();
+			if ($foundComposerRoot === null) {
+				$pwd = getcwd();
+			} else {
+				if ($composerRoot === null) {
+					$composerRoot = $foundComposerRoot;
+				}
+				$cwd = getcwd();
+				$pwd = ($cwd === false) ? $foundComposerRoot : self::combineComposerRootAndCwd($foundComposerRoot, $cwd);
 			}
 		}
 
+		if ($composerRoot === null) {
+			$composerRoot = $pwd;
+		}
+
 		Resque::push($queue, array(
-			'class'	     => $class,
-			'args'	     => array($args),
-			'id'	     => $id,
-			'prefix'     => $prefix,
-			'pwd'        => $pwd,
-			'queue_time' => microtime(true),
+			'class'	        => $class,
+			'args'	        => array($args),
+			'id'	        => $id,
+			'prefix'        => $prefix,
+			'pwd'           => $pwd,
+			'composerRoot'  => $composerRoot,
+			'queue_time'    => microtime(true),
 		));
 
 		if ($monitor) {
@@ -279,7 +297,7 @@ class Resque_Job
 			}
 		}
 
-		return self::create($this->queue, $this->payload['class'], $this->getArguments(), $monitor, null, $this->getPrefix(), $this->getPwd());
+		return self::create($this->queue, $this->payload['class'], $this->getArguments(), $monitor, null, $this->getPrefix(), $this->getPwd(), $this->getComposerRoot());
 	}
 
 	/**
@@ -349,59 +367,174 @@ class Resque_Job
 	}
 
 	/**
-	 * How many parent directories above $startDir to try, in addition to
-	 * $startDir itself, when searching for the router script - see
-	 * resolveCheckoutRoot(). A single checkout can be enqueued into from
-	 * entry points with different working directories (e.g. a PHP-FPM
-	 * request rooted in a "www/" subdirectory of the checkout vs. a
-	 * CLI/cron script rooted at the checkout itself); this bounded upward
-	 * walk finds the checkout root without needing every such convention
-	 * enumerated explicitly. Kept small and fixed - same spirit as
-	 * bin/resque's own handful of hardcoded Composer-autoload candidates -
-	 * rather than an unbounded walk, so a misconfigured RESQUE_ROUTER_SCRIPT_PATH
-	 * still fails to resolve (falling back to plain getcwd(), see create())
-	 * instead of silently matching an unrelated ancestor directory.
+	 * @return string|null
 	 */
-	const MAX_ROUTER_SCRIPT_SEARCH_DEPTH = 3;
+	private function getComposerRoot()
+	{
+		if (isset($this->payload['composerRoot'])) {
+			return $this->payload['composerRoot'];
+		}
+
+		return null;
+	}
 
 	/**
-	 * Find the checkout root by walking upward from $startDir, looking for
-	 * the router script (RESQUE_ROUTER_SCRIPT_PATH, default
-	 * 'vendor/bin/resque-run-job' - the standard Composer bin-dir location)
-	 * at $startDir itself, then at each of up to
-	 * MAX_ROUTER_SCRIPT_SEARCH_DEPTH parent directories above it. Returns
-	 * the first ancestor (including $startDir) where it's found, or null if
-	 * none match within the search depth.
+	 * How many levels above the auto-discovered Composer root (see
+	 * findComposerRoot()) we're willing to trust as the "true" checkout root
+	 * when combining it with getcwd() - see resolveCheckoutRoot(). Composer
+	 * sometimes lives in a subdirectory of the actual checkout root (e.g.
+	 * "lib/"); getcwd() from an entry point that runs alongside that
+	 * subdirectory (e.g. a sibling "app/" or "www/" dir) shares a common
+	 * ancestor with the Composer root at exactly that outer level. Bounded
+	 * so a getcwd() that's genuinely unrelated to this checkout (e.g. a
+	 * stray cron cwd) can't drag the result all the way up toward "/" -
+	 * beyond this bound we just trust the Composer root itself instead.
+	 */
+	const MAX_REPO_ROOT_CLIMB = 3;
+
+	/**
+	 * Find the checkout root with zero configuration, by combining two
+	 * signals that are already available on every entry point without any
+	 * setup:
+	 *
+	 *  1. findComposerRoot() - where this library itself is installed,
+	 *     via __DIR__, which is fixed at compile time to wherever this file
+	 *     physically lives on disk and is therefore identical no matter
+	 *     which entry point (PHP-FPM, CLI, cron) loads it.
+	 *  2. $cwd (defaults to getcwd()) - whatever directory the calling
+	 *     process happens to be running from.
+	 *
+	 * Their longest common ancestor path is the checkout root: if Composer
+	 * lives directly at the checkout root, $cwd is always a descendant of
+	 * it and the common ancestor is the Composer root itself, unchanged. If
+	 * Composer lives in a subdirectory (e.g. "lib/") and the caller runs
+	 * from a sibling directory (e.g. "app/" or "www/"), their common
+	 * ancestor is exactly the outer checkout root - which is what
+	 * APP_INCLUDE's conventional paths are written relative to.
 	 *
 	 * This resolves the checkout root once, at job-creation time, so
 	 * Resque_Worker::routeJobToPwd() can trust the stored 'pwd' as-is and
-	 * doesn't need to repeat this search on every route.
+	 * doesn't need to repeat any of this on every route.
 	 *
-	 * Pure filesystem check - safe to call directly in tests.
-	 *
-	 * @param string $startDir
-	 * @return string|null
+	 * @param string|null $cwd Defaults to getcwd(); overridable for tests.
+	 * @return string|null Null only if the Composer root itself can't be found.
 	 */
-	public static function resolveCheckoutRoot($startDir)
+	public static function resolveCheckoutRoot($cwd = null)
 	{
-		$relative = getenv('RESQUE_ROUTER_SCRIPT_PATH');
-		if ($relative === false || $relative === '') {
-			$relative = 'vendor/bin/resque-run-job';
+		$composerRoot = self::findComposerRoot();
+		if ($composerRoot === null) {
+			return null;
 		}
 
-		$startDir = rtrim($startDir, '/');
+		if ($cwd === null) {
+			$cwd = getcwd();
+		}
+		if ($cwd === false) {
+			return $composerRoot;
+		}
 
-		for ($levelsUp = 0; $levelsUp <= self::MAX_ROUTER_SCRIPT_SEARCH_DEPTH; $levelsUp++) {
-			$candidateRoot = $startDir . str_repeat('/..', $levelsUp);
+		return self::combineComposerRootAndCwd($composerRoot, $cwd);
+	}
+
+	/**
+	 * The common-ancestor-with-climb-bound step of resolveCheckoutRoot(),
+	 * factored out so Resque_Job::create() can reuse it after already
+	 * having called findComposerRoot() itself (to also capture the
+	 * Composer root separately, for the 'composerRoot' payload field),
+	 * without searching the filesystem for it twice.
+	 *
+	 * @param string $composerRoot
+	 * @param string $cwd
+	 * @return string
+	 */
+	private static function combineComposerRootAndCwd($composerRoot, $cwd)
+	{
+		$ancestor = self::findCommonAncestor($composerRoot, $cwd);
+
+		$climbed = self::pathDepth($composerRoot) - self::pathDepth($ancestor);
+		if ($climbed < 0 || $climbed > self::MAX_REPO_ROOT_CLIMB) {
+			return $composerRoot;
+		}
+
+		return $ancestor;
+	}
+
+	/**
+	 * Locate the Composer root - the directory containing this library's
+	 * own installed vendor/bin/resque-run-job - by walking up from __DIR__,
+	 * which is fixed at compile time to wherever this file physically lives
+	 * on disk. Tries two depths, first file_exists() match wins:
+	 *
+	 *  - 5 levels up, checking for 'vendor/bin/resque-run-job': installed as
+	 *    a normal Composer dependency at
+	 *    {composerRoot}/vendor/resque/php-resque/lib/Resque/Job.php.
+	 *  - 2 levels up, checking for 'bin/resque-run-job' (no "vendor/"
+	 *    prefix): php-resque itself is the root package (its own dev
+	 *    checkout / test suite) - Composer does not symlink a root
+	 *    package's own declared "bin" entries into its own vendor/bin/.
+	 *
+	 * Returned path is realpath()'d before returning where possible - it
+	 * ends up logged and persisted in Redis job payloads, so it should read
+	 * as a clean, canonical path rather than one with embedded "/.."
+	 * segments.
+	 *
+	 * @return string|null
+	 */
+	private static function findComposerRoot()
+	{
+		$candidates = array(
+			array(5, 'vendor/bin/resque-run-job'),
+			array(2, 'bin/resque-run-job'),
+		);
+
+		foreach ($candidates as $candidate) {
+			list($levelsUp, $relative) = $candidate;
+			$candidateRoot = __DIR__ . str_repeat('/..', $levelsUp);
 			if (file_exists($candidateRoot . '/' . $relative)) {
-				// Normalize away the embedded "/.." segments before storing/
-				// returning this - it ends up logged and persisted in Redis
-				// job payloads, so it should read as a clean, canonical path.
 				$realCandidateRoot = realpath($candidateRoot);
 				return $realCandidateRoot !== false ? $realCandidateRoot : $candidateRoot;
 			}
 		}
 
 		return null;
+	}
+
+	/**
+	 * The longest common leading path segment of $a and $b. Pure string
+	 * logic - no filesystem access - so it's safe (and cheap) to call with
+	 * synthetic paths in tests.
+	 *
+	 * @param string $a
+	 * @param string $b
+	 * @return string
+	 */
+	private static function findCommonAncestor($a, $b)
+	{
+		$partsA = explode('/', rtrim($a, '/'));
+		$partsB = explode('/', rtrim($b, '/'));
+
+		$common = array();
+		$max = min(count($partsA), count($partsB));
+		for ($i = 0; $i < $max; $i++) {
+			if ($partsA[$i] !== $partsB[$i]) {
+				break;
+			}
+			$common[] = $partsA[$i];
+		}
+
+		$joined = implode('/', $common);
+		return $joined === '' ? '/' : $joined;
+	}
+
+	/**
+	 * Number of non-empty path segments in $path - used to bound how far
+	 * resolveCheckoutRoot() is willing to climb above the Composer root.
+	 *
+	 * @param string $path
+	 * @return int
+	 */
+	private static function pathDepth($path)
+	{
+		return count(array_filter(explode('/', $path), 'strlen'));
 	}
 }

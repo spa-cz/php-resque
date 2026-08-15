@@ -343,17 +343,24 @@ class Resque_Worker
 	}
 
 	/**
-	 * Re-execute the given job in a brand new process rooted in the job's
-	 * payload 'pwd', by chdir()-ing there and then replacing this (forked
-	 * child) process's image via pcntl_exec() into that pwd's own
-	 * vendor/bin/resque-run-job (or RESQUE_ROUTER_SCRIPT_PATH, if set) - so
-	 * the routed process runs with that checkout's own code and dependencies,
-	 * including its own vendored copy of this library.
+	 * Re-execute the given job in a brand new process, by chdir()-ing into
+	 * its payload 'pwd' and then replacing this (forked child) process's
+	 * image via pcntl_exec() into its payload 'composerRoot's own
+	 * vendor/bin/resque-run-job - so the routed process runs with that
+	 * checkout's own code and dependencies, including its own vendored copy
+	 * of this library.
 	 *
-	 * 'pwd' is trusted as-is here: Resque_Job::create() already resolved it
-	 * to the checkout root (walking upward from getcwd() if needed) at
-	 * job-creation time, so no further searching happens on the routing
-	 * side - this is a direct, single concatenation.
+	 * 'pwd' and 'composerRoot' are distinct fields (see
+	 * Resque_Job::create()'s docblock) whenever Composer lives in a
+	 * subdirectory of the checkout (e.g. "lib/"): 'pwd' is the outer
+	 * checkout root - what the exec'd process's cwd needs to be so a
+	 * conventionally-written, relative APP_INCLUDE resolves correctly -
+	 * while 'composerRoot' is that subdirectory, where vendor/bin/ actually
+	 * lives. Both are trusted as-is here: Resque_Job::create() already
+	 * resolved them at job-creation time, so no searching happens on the
+	 * routing side - this is a direct, single concatenation. Falls back to
+	 * 'pwd' for 'composerRoot' if the payload predates this field (a legacy
+	 * job still sitting in the queue during a deploy).
 	 *
 	 * Must only be called when $this->child === 0 (a genuine fork).
 	 *
@@ -377,11 +384,8 @@ class Resque_Worker
 	private function routeJobToPwd(Resque_Job $job)
 	{
 		$jobPwd = rtrim((string)$job->payload['pwd'], '/');
-		$relativeScript = getenv('RESQUE_ROUTER_SCRIPT_PATH');
-		if ($relativeScript === false || $relativeScript === '') {
-			$relativeScript = 'vendor/bin/resque-run-job';
-		}
-		$script = $jobPwd . '/' . $relativeScript;
+		$composerRoot = !empty($job->payload['composerRoot']) ? rtrim((string)$job->payload['composerRoot'], '/') : $jobPwd;
+		$script = $composerRoot . '/vendor/bin/resque-run-job';
 
 		$envelope = array(
 			'queue'    => $job->queue,

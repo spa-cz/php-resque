@@ -44,7 +44,8 @@
 	},
 	"bin": [
 		"bin/resque",
-		"bin/resque-scheduler"
+		"bin/resque-scheduler",
+		"bin/resque-run-job"
 	],
 	"autoload": {
 		"psr-0": {

@@ -236,10 +236,18 @@ class Resque_Worker
 					Resque_Job_PID::create($job->payload['id']);
 				}
 
-				$this->perform($job);
+				if ($this->shouldRouteJob($job)) {
+					// On success this never returns (process image replaced).
+					// On failure it fails the job and cleans up the PID entry
+					// itself, then returns here so we fall through to the
+					// normal exit(0) below.
+					$this->routeJobToPwd($job);
+				} else {
+					$this->perform($job);
 
-				if (!empty($job->payload['id'])) {
-					Resque_Job_PID::del($job->payload['id']);
+					if (!empty($job->payload['id'])) {
+						Resque_Job_PID::del($job->payload['id']);
+					}
 				}
 
 				if ($this->child === 0) {
@@ -305,6 +313,103 @@ class Resque_Worker
 
 		$job->updateStatus(Resque_Job_Status::STATUS_COMPLETE, $result);
 		$this->logger->log(Psr\Log\LogLevel::NOTICE, '{job} has finished', array('job' => $job));
+	}
+
+	/**
+	 * Determine whether the given job should be routed to a new process
+	 * rooted in a different working directory (its payload's 'pwd') instead
+	 * of being performed in this process.
+	 *
+	 * This is a pure decision based on environment/payload/cwd - it never
+	 * touches pcntl_exec() and is safe to call directly in tests.
+	 *
+	 * @param Resque_Job $job
+	 * @return bool
+	 */
+	public function shouldRouteJob(Resque_Job $job)
+	{
+		if (!getenv('RESQUE_ROUTER_ENABLED')) {
+			return false;
+		}
+
+		if (empty($job->payload['pwd'])) {
+			return false;
+		}
+
+		$jobPwd = rtrim((string)$job->payload['pwd'], '/');
+		$myPwd  = rtrim((string)getcwd(), '/');
+
+		return $jobPwd !== $myPwd;
+	}
+
+	/**
+	 * Re-execute the given job in a brand new process rooted in the job's
+	 * payload 'pwd', by chdir()-ing there and then replacing this (forked
+	 * child) process's image via pcntl_exec() into that pwd's own
+	 * vendor/bin/resque-run-job (or RESQUE_ROUTER_SCRIPT_PATH, if set) - so
+	 * the routed process runs with that checkout's own code and dependencies,
+	 * including its own vendored copy of this library.
+	 *
+	 * Must only be called when $this->child === 0 (a genuine fork).
+	 *
+	 * On success, this method never returns - pcntl_exec() replaces the
+	 * process image. The exec'd bin/resque-run-job is responsible for
+	 * calling Resque_Job_PID::del() itself once it finishes the job.
+	 *
+	 * On failure (missing script, chdir failure, or pcntl_exec failing to
+	 * launch), this method fails the job via Resque_Job::fail() - mirroring
+	 * how Resque_Worker::perform() fails jobs on a caught exception - cleans
+	 * up the Resque_Job_PID entry that the caller already created, logs the
+	 * failure, and returns normally so work() falls through to its usual
+	 * exit(0). It deliberately does NOT exit(1)/rethrow: work()'s parent-side
+	 * pcntl_wait handling treats any nonzero child exit as a "dirty exit" and
+	 * calls $job->fail() again itself, which would double-record the failure
+	 * (two Resque_Failure entries, two 'failed' stat increments) for the
+	 * same job.
+	 *
+	 * @param Resque_Job $job
+	 */
+	private function routeJobToPwd(Resque_Job $job)
+	{
+		$jobPwd = rtrim((string)$job->payload['pwd'], '/');
+		$relativeScript = getenv('RESQUE_ROUTER_SCRIPT_PATH') ?: 'vendor/bin/resque-run-job';
+		$script = $jobPwd . '/' . $relativeScript;
+
+		$envelope = array(
+			'queue'    => $job->queue,
+			'payload'  => $job->payload,
+			'workerId' => (string)$this,
+		);
+		$encoded = base64_encode(json_encode($envelope));
+
+		try {
+			if (!file_exists($script)) {
+				throw new RuntimeException('Cannot route job: router script not found: ' . $script);
+			}
+
+			if (!@chdir($jobPwd)) {
+				throw new RuntimeException('Cannot route job: chdir to ' . $jobPwd . ' failed.');
+			}
+
+			$this->logger->log(Psr\Log\LogLevel::INFO, 'Routing {job} to {pwd}', array('job' => $job, 'pwd' => $jobPwd));
+
+			pcntl_exec(PHP_BINARY, array($script, $encoded));
+
+			// pcntl_exec() only returns on failure.
+			throw new RuntimeException('Cannot route job: pcntl_exec failed to launch ' . $script);
+		} catch (Exception $e) {
+			$this->logger->log(Psr\Log\LogLevel::CRITICAL, '{job} failed to route: {exception}', array('job' => $job, 'exception' => $e));
+			$job->fail($e);
+			if (!empty($job->payload['id'])) {
+				Resque_Job_PID::del($job->payload['id']);
+			}
+		} catch (Error $e) {
+			$this->logger->log(Psr\Log\LogLevel::CRITICAL, '{job} failed to route: {exception}', array('job' => $job, 'exception' => $e));
+			$job->fail($e);
+			if (!empty($job->payload['id'])) {
+				Resque_Job_PID::del($job->payload['id']);
+			}
+		}
 	}
 
 	/**

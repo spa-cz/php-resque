@@ -55,11 +55,14 @@ class Resque_Job
 	 * @param boolean $monitor Set to true to be able to monitor the status of a job.
 	 * @param string $id Unique identifier for tracking the job. Generated if not supplied.
 	 * @param string $prefix The prefix needs to be set for the status key
+	 * @param string|null $pwd The filesystem root that is enqueuing this job (defaults
+	 *        to getcwd()); a router pool re-executes the job in a process rooted here
+	 *        if it differs from the pool's own cwd.
 	 *
 	 * @return string
 	 * @throws \InvalidArgumentException
 	 */
-	public static function create($queue, $class, $args = null, $monitor = false, $id = null, $prefix = "")
+	public static function create($queue, $class, $args = null, $monitor = false, $id = null, $prefix = "", $pwd = null)
 	{
 		if (is_null($id)) {
 			$id = Resque::generateJobId();
@@ -70,11 +73,17 @@ class Resque_Job
 				'Supplied $args must be an array.'
 			);
 		}
+
+		if ($pwd === null) {
+			$pwd = getcwd();
+		}
+
 		Resque::push($queue, array(
 			'class'	     => $class,
 			'args'	     => array($args),
 			'id'	     => $id,
 			'prefix'     => $prefix,
+			'pwd'        => $pwd,
 			'queue_time' => microtime(true),
 		));
 
@@ -261,7 +270,7 @@ class Resque_Job
 			}
 		}
 
-		return self::create($this->queue, $this->payload['class'], $this->getArguments(), $monitor, null, $this->getPrefix());
+		return self::create($this->queue, $this->payload['class'], $this->getArguments(), $monitor, null, $this->getPrefix(), $this->getPwd());
 	}
 
 	/**
@@ -316,5 +325,17 @@ class Resque_Job
 		}
 
 		return '';
+	}
+
+	/**
+	 * @return string|null
+	 */
+	private function getPwd()
+	{
+		if (isset($this->payload['pwd'])) {
+			return $this->payload['pwd'];
+		}
+
+		return null;
 	}
 }

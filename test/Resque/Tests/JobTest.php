@@ -114,6 +114,47 @@ class Resque_Tests_JobTest extends Resque_Tests_TestCase
 		$this->assertEquals($job->getArguments(), $newJob->getArguments());
 	}
 
+	public function testJobPayloadDefaultsPwdToCwd()
+	{
+		Resque::enqueue('jobs', 'Test_Job');
+		$job = Resque_Job::reserve('jobs');
+
+		$this->assertEquals(getcwd(), $job->payload['pwd']);
+	}
+
+	public function testJobPayloadPwdCanBeOverridden()
+	{
+		Resque::enqueue('jobs', 'Test_Job', null, false, '', '/some/other/pwd');
+		$job = Resque_Job::reserve('jobs');
+
+		$this->assertEquals('/some/other/pwd', $job->payload['pwd']);
+	}
+
+	public function testRecreatePreservesOriginalPwd()
+	{
+		Resque::enqueue('jobs', 'Test_Job', null, false, '', '/some/other/pwd');
+		$job = Resque_Job::reserve('jobs');
+
+		$job->recreate();
+
+		$newJob = Resque_Job::reserve('jobs');
+		$this->assertEquals('/some/other/pwd', $newJob->payload['pwd']);
+	}
+
+	public function testLegacyPayloadWithoutPwdStillWorks()
+	{
+		$payload = array(
+			'class' => 'Test_Job',
+			'args'  => array(null),
+		);
+		$job = new Resque_Job('jobs', $payload);
+
+		$id = $job->recreate();
+
+		$this->assertNotEmpty($id);
+		$newJob = Resque_Job::reserve('jobs');
+		$this->assertEquals(getcwd(), $newJob->payload['pwd']);
+	}
 
 	public function testFailedJobExceptionsAreCaught()
 	{

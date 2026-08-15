@@ -1,0 +1,123 @@
+#!/usr/bin/env php
+<?php
+
+// Find and initialize Composer
+$files = array(
+    __DIR__ . '/../../vendor/autoload.php',
+    __DIR__ . '/../../../autoload.php',
+    __DIR__ . '/../../../../autoload.php',
+    __DIR__ . '/../vendor/autoload.php',
+);
+
+foreach ($files as $file) {
+    if (file_exists($file)) {
+        require_once $file;
+        break;
+    }
+}
+
+if (!class_exists('Composer\Autoload\ClassLoader', false)) {
+    die(
+        'You need to set up the project dependencies using the following commands:' . PHP_EOL .
+            'curl -s http://getcomposer.org/installer | php' . PHP_EOL .
+            'php composer.phar install' . PHP_EOL
+    );
+}
+
+// argv[1] is a base64-encoded JSON envelope produced by
+// Resque_Worker::routeJobToPwd(): {"queue":..., "payload":..., "workerId":...}
+if (empty($argv[1])) {
+    fwrite(STDERR, "Usage: resque-run-job <base64-json-envelope>\n");
+    exit(1);
+}
+
+$decoded = base64_decode($argv[1], true);
+if ($decoded === false) {
+    fwrite(STDERR, "Invalid envelope: not valid base64.\n");
+    exit(1);
+}
+
+$envelope = json_decode($decoded, true);
+if (!is_array($envelope) || !isset($envelope['queue'], $envelope['payload'], $envelope['workerId'])) {
+    fwrite(STDERR, "Invalid envelope: malformed JSON or missing fields.\n");
+    exit(1);
+}
+
+/**
+ * REDIS_BACKEND can have simple 'host:port' format or use a DSN-style format like this:
+ * - redis://user:pass@host:port
+ *
+ * Note: the 'user' part of the DSN URI is required but is not used.
+ */
+$REDIS_BACKEND = getenv('REDIS_BACKEND');
+
+// A redis database number
+$REDIS_BACKEND_DB = getenv('REDIS_BACKEND_DB');
+if(!empty($REDIS_BACKEND)) {
+    if (empty($REDIS_BACKEND_DB))
+        Resque::setBackend($REDIS_BACKEND);
+    else
+        Resque::setBackend($REDIS_BACKEND, $REDIS_BACKEND_DB);
+}
+
+$logLevel = false;
+$LOGGING = getenv('LOGGING');
+$VERBOSE = getenv('VERBOSE');
+$VVERBOSE = getenv('VVERBOSE');
+if(!empty($LOGGING) || !empty($VERBOSE)) {
+    $logLevel = true;
+}
+else if(!empty($VVERBOSE)) {
+    $logLevel = true;
+}
+
+// APP_INCLUDE is resolved relative to the CURRENT WORKING DIRECTORY. The
+// routing worker chdir()'d into the job's own 'pwd' before pcntl_exec()'ing
+// this script, and that chdir persists across exec(). So a *relative*
+// APP_INCLUDE (e.g. APP_INCLUDE=./resque-bootstrap.php), set once on the
+// shared router pool, resolves within whichever checkout a job got routed
+// to, automatically - no extra code needed beyond bin/resque's own logic.
+$APP_INCLUDE = getenv('APP_INCLUDE');
+if($APP_INCLUDE) {
+    if(!file_exists($APP_INCLUDE)) {
+        die('APP_INCLUDE ('.$APP_INCLUDE.") does not exist.\n");
+    }
+
+    require_once $APP_INCLUDE;
+}
+
+// See if the APP_INCLUDE containes a logger object,
+// If none exists, fallback to internal logger
+if (!isset($logger) || !is_object($logger)) {
+    $logger = new Resque_Log($logLevel);
+}
+
+$PREFIX = getenv('PREFIX');
+if(!empty($PREFIX)) {
+    $logger->log(Psr\Log\LogLevel::INFO, 'Prefix set to {prefix}', array('prefix' => $PREFIX));
+    Resque_Redis::prefix($PREFIX);
+}
+
+$queue   = $envelope['queue'];
+$payload = $envelope['payload'];
+
+$job = new Resque_Job($queue, $payload);
+
+$worker = new Resque_Worker($queue);
+$worker->setLogger($logger);
+$worker->setId($envelope['workerId']);
+
+// Reassociate the job with the (reconstructed) worker so that
+// Resque_Job::fail()'s stat/failure writes ('failed:' . $this->worker) land
+// on the SAME worker id the routing pool is known by. Normally this happens
+// implicitly via Resque_Worker::workingOn() before a fork; here we do it
+// explicitly since pcntl_exec() wiped all prior process state.
+$job->worker = $worker;
+
+$worker->perform($job);
+
+if (!empty($payload['id'])) {
+    Resque_Job_PID::del($payload['id']);
+}
+
+exit(0);

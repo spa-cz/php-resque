@@ -301,4 +301,72 @@ class Resque_Tests_WorkerTest extends Resque_Tests_TestCase
 
         $this->assertEquals(1, Resque_Stat::get('failed'));
     }
+
+    protected $originalRouterEnabledEnv;
+
+    public function setUp(): void
+    {
+        parent::setUp();
+        $this->originalRouterEnabledEnv = getenv('RESQUE_ROUTER_ENABLED');
+        putenv('RESQUE_ROUTER_ENABLED');
+    }
+
+    public function tearDown(): void
+    {
+        if ($this->originalRouterEnabledEnv === false) {
+            putenv('RESQUE_ROUTER_ENABLED');
+        } else {
+            putenv('RESQUE_ROUTER_ENABLED=' . $this->originalRouterEnabledEnv);
+        }
+    }
+
+    public function testShouldRouteJobReturnsFalseWhenRouterEnabledEnvNotSet()
+    {
+        putenv('RESQUE_ROUTER_ENABLED');
+
+        $job = new Resque_Job('jobs', array('class' => 'Test_Job', 'pwd' => sys_get_temp_dir()));
+
+        $worker = new Resque_Worker('jobs');
+        $this->assertFalse($worker->shouldRouteJob($job));
+    }
+
+    public function testShouldRouteJobReturnsFalseWhenPayloadHasNoPwd()
+    {
+        putenv('RESQUE_ROUTER_ENABLED=1');
+
+        $job = new Resque_Job('jobs', array('class' => 'Test_Job'));
+
+        $worker = new Resque_Worker('jobs');
+        $this->assertFalse($worker->shouldRouteJob($job));
+    }
+
+    public function testShouldRouteJobReturnsFalseWhenPwdEqualsCwd()
+    {
+        putenv('RESQUE_ROUTER_ENABLED=1');
+
+        $job = new Resque_Job('jobs', array('class' => 'Test_Job', 'pwd' => getcwd()));
+
+        $worker = new Resque_Worker('jobs');
+        $this->assertFalse($worker->shouldRouteJob($job));
+    }
+
+    public function testShouldRouteJobReturnsTrueForNonexistentPwdPath()
+    {
+        putenv('RESQUE_ROUTER_ENABLED=1');
+
+        $job = new Resque_Job('jobs', array('class' => 'Test_Job', 'pwd' => '/definitely/does/not/exist/' . uniqid()));
+
+        $worker = new Resque_Worker('jobs');
+        $this->assertTrue($worker->shouldRouteJob($job));
+    }
+
+    public function testShouldRouteJobReturnsTrueOnGenuineMismatch()
+    {
+        putenv('RESQUE_ROUTER_ENABLED=1');
+
+        $job = new Resque_Job('jobs', array('class' => 'Test_Job', 'pwd' => sys_get_temp_dir()));
+
+        $worker = new Resque_Worker('jobs');
+        $this->assertTrue($worker->shouldRouteJob($job));
+    }
 }

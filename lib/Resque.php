@@ -222,10 +222,13 @@ class Resque
 	 * @param array $args Any optional arguments that should be passed when the job is executed.
 	 * @param boolean $trackStatus Set to true to be able to monitor the status of a job.
 	 * @param string $prefix The prefix needs to be set for the status key
+	 * @param string|null $pwd The filesystem root that is enqueuing this job (defaults
+	 *        to getcwd()); a router pool re-executes the job in a process rooted here
+	 *        if it differs from the pool's own cwd.
 	 *
 	 * @return string|boolean Job ID when the job was created, false if creation was cancelled due to beforeEnqueue
 	 */
-	public static function enqueue($queue, $class, $args = null, $trackStatus = false, $prefix = "")
+	public static function enqueue($queue, $class, $args = null, $trackStatus = false, $prefix = "", $pwd = null)
 	{
 		$id         = Resque::generateJobId();
 		$hookParams = array(
@@ -240,7 +243,7 @@ class Resque
 			return false;
 		}
 
-		Resque_Job::create($queue, $class, $args, $trackStatus, $id, $prefix);
+		Resque_Job::create($queue, $class, $args, $trackStatus, $id, $prefix, $pwd);
 		Resque_Event::trigger('afterEnqueue', $hookParams);
 
 		return $id;

@@ -403,7 +403,7 @@ class Resque_Worker
 				throw new RuntimeException('Cannot route job: chdir to ' . $jobPwd . ' failed.');
 			}
 
-			$this->logger->log(Psr\Log\LogLevel::INFO, 'Routing {job} to {pwd}', array('job' => $job, 'pwd' => $jobPwd));
+			$this->logger->log(Psr\Log\LogLevel::NOTICE, 'Routing {job} to {pwd}', array('job' => $job, 'pwd' => $jobPwd));
 
 			pcntl_exec(PHP_BINARY, array($script, $encoded));
 

@@ -343,12 +343,78 @@ class Resque_Worker
 	}
 
 	/**
+	 * How many parent directories above a job's pwd to try, in addition to
+	 * the pwd itself, when searching for the router script - see
+	 * getRouterScriptCandidates(). A single checkout can be enqueued into
+	 * from entry points with different working directories (e.g. a PHP-FPM
+	 * request rooted in a "www/" subdirectory of the checkout vs. a
+	 * CLI/cron script rooted at the checkout itself); this bounded upward
+	 * walk finds the checkout root without needing every such convention
+	 * enumerated explicitly. Kept small and fixed - same spirit as
+	 * bin/resque's own handful of hardcoded Composer-autoload candidates -
+	 * rather than an unbounded walk, so a misconfigured RESQUE_ROUTER_SCRIPT_PATH
+	 * still fails loudly instead of silently matching an unrelated
+	 * ancestor directory.
+	 */
+	const MAX_ROUTER_SCRIPT_SEARCH_DEPTH = 3;
+
+	/**
+	 * Build the ordered list of absolute candidate paths to try for the
+	 * router script, for the given job pwd: the same relative suffix
+	 * (RESQUE_ROUTER_SCRIPT_PATH, default 'vendor/bin/resque-run-job' - the
+	 * standard Composer bin-dir location), tried first directly under the
+	 * job's pwd, then under each of up to MAX_ROUTER_SCRIPT_SEARCH_DEPTH
+	 * parent directories above it.
+	 *
+	 * @param string $jobPwd
+	 * @return string[]
+	 */
+	private function getRouterScriptCandidates($jobPwd)
+	{
+		$relative = getenv('RESQUE_ROUTER_SCRIPT_PATH');
+		if ($relative === false || $relative === '') {
+			$relative = 'vendor/bin/resque-run-job';
+		}
+
+		$jobPwd = rtrim($jobPwd, '/');
+
+		$candidates = array();
+		for ($levelsUp = 0; $levelsUp <= self::MAX_ROUTER_SCRIPT_SEARCH_DEPTH; $levelsUp++) {
+			$candidates[] = $jobPwd . str_repeat('/..', $levelsUp) . '/' . $relative;
+		}
+
+		return $candidates;
+	}
+
+	/**
+	 * Resolve the router script to exec for the given job pwd: the first
+	 * candidate from getRouterScriptCandidates() that exists on disk, or
+	 * null if none do.
+	 *
+	 * Pure filesystem check, no pcntl_exec() - safe to call directly in
+	 * tests.
+	 *
+	 * @param string $jobPwd
+	 * @return string|null
+	 */
+	public function resolveRouterScript($jobPwd)
+	{
+		foreach ($this->getRouterScriptCandidates($jobPwd) as $candidate) {
+			if (file_exists($candidate)) {
+				return $candidate;
+			}
+		}
+
+		return null;
+	}
+
+	/**
 	 * Re-execute the given job in a brand new process rooted in the job's
 	 * payload 'pwd', by chdir()-ing there and then replacing this (forked
-	 * child) process's image via pcntl_exec() into that pwd's own
-	 * vendor/bin/resque-run-job (or RESQUE_ROUTER_SCRIPT_PATH, if set) - so
-	 * the routed process runs with that checkout's own code and dependencies,
-	 * including its own vendored copy of this library.
+	 * child) process's image via pcntl_exec() into the router script
+	 * resolved by resolveRouterScript() - so the routed process runs with
+	 * that checkout's own code and dependencies, including its own vendored
+	 * copy of this library.
 	 *
 	 * Must only be called when $this->child === 0 (a genuine fork).
 	 *
@@ -356,24 +422,22 @@ class Resque_Worker
 	 * process image. The exec'd bin/resque-run-job is responsible for
 	 * calling Resque_Job_PID::del() itself once it finishes the job.
 	 *
-	 * On failure (missing script, chdir failure, or pcntl_exec failing to
-	 * launch), this method fails the job via Resque_Job::fail() - mirroring
-	 * how Resque_Worker::perform() fails jobs on a caught exception - cleans
-	 * up the Resque_Job_PID entry that the caller already created, logs the
-	 * failure, and returns normally so work() falls through to its usual
-	 * exit(0). It deliberately does NOT exit(1)/rethrow: work()'s parent-side
-	 * pcntl_wait handling treats any nonzero child exit as a "dirty exit" and
-	 * calls $job->fail() again itself, which would double-record the failure
-	 * (two Resque_Failure entries, two 'failed' stat increments) for the
-	 * same job.
+	 * On failure (no candidate script found, chdir failure, or pcntl_exec
+	 * failing to launch), this method fails the job via Resque_Job::fail() -
+	 * mirroring how Resque_Worker::perform() fails jobs on a caught
+	 * exception - cleans up the Resque_Job_PID entry that the caller
+	 * already created, logs the failure, and returns normally so work()
+	 * falls through to its usual exit(0). It deliberately does NOT
+	 * exit(1)/rethrow: work()'s parent-side pcntl_wait handling treats any
+	 * nonzero child exit as a "dirty exit" and calls $job->fail() again
+	 * itself, which would double-record the failure (two Resque_Failure
+	 * entries, two 'failed' stat increments) for the same job.
 	 *
 	 * @param Resque_Job $job
 	 */
 	private function routeJobToPwd(Resque_Job $job)
 	{
 		$jobPwd = rtrim((string)$job->payload['pwd'], '/');
-		$relativeScript = getenv('RESQUE_ROUTER_SCRIPT_PATH') ?: 'vendor/bin/resque-run-job';
-		$script = $jobPwd . '/' . $relativeScript;
 
 		$envelope = array(
 			'queue'    => $job->queue,
@@ -383,8 +447,12 @@ class Resque_Worker
 		$encoded = base64_encode(json_encode($envelope));
 
 		try {
-			if (!file_exists($script)) {
-				throw new RuntimeException('Cannot route job: router script not found: ' . $script);
+			$script = $this->resolveRouterScript($jobPwd);
+			if ($script === null) {
+				throw new RuntimeException(
+					'Cannot route job: router script not found. Tried: '
+					. implode(', ', $this->getRouterScriptCandidates($jobPwd))
+				);
 			}
 
 			if (!@chdir($jobPwd)) {

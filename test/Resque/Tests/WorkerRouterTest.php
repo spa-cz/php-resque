@@ -105,4 +105,85 @@ class Resque_Tests_WorkerRouterTest extends Resque_Tests_TestCase
         $status = new Resque_Job_Status($token);
         $this->assertEquals(Resque_Job_Status::STATUS_COMPLETE, $status->get());
     }
+
+    /**
+     * Reproduces the reported production bug end to end via a real
+     * pcntl_exec(): a checkout whose router script lives at
+     * lib/vendor/bin/resque-run-job (not the default vendor/bin/...), where
+     * the job's captured pwd is a "www/" subdirectory one level below the
+     * checkout root (e.g. a PHP-FPM request rooted there) rather than the
+     * checkout root itself. A single static RESQUE_ROUTER_SCRIPT_PATH must
+     * still resolve and route correctly, via the bounded upward walk.
+     */
+    public function testJobWithSubdirectoryPwdIsRoutedViaUpwardSearch()
+    {
+        $originalRouterScriptPathEnv = getenv('RESQUE_ROUTER_SCRIPT_PATH');
+        $originalAppIncludeEnv = getenv('APP_INCLUDE');
+
+        $checkoutRoot = realpath(sys_get_temp_dir()) . '/resque-router-subdir-test-' . uniqid();
+        $webPwd = $checkoutRoot . '/www';
+        mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
+        mkdir($webPwd, 0777, true);
+
+        $realAutoload = realpath(__DIR__ . '/../../../vendor/autoload.php');
+        file_put_contents(
+            $checkoutRoot . '/lib/vendor/autoload.php',
+            "<?php\nrequire_once " . var_export($realAutoload, true) . ";\n"
+        );
+
+        copy(__DIR__ . '/../../../bin/resque-run-job', $checkoutRoot . '/lib/vendor/bin/resque-run-job');
+        chmod($checkoutRoot . '/lib/vendor/bin/resque-run-job', 0755);
+
+        // chdir() lands in $webPwd (the job's pwd), so APP_INCLUDE - resolved
+        // relative to cwd, same as bin/resque - must live there, not at the
+        // checkout root.
+        $marker = $webPwd . '/marker.txt';
+        file_put_contents(
+            $webPwd . '/bootstrap.php',
+            "<?php\n" .
+            "#[AllowDynamicProperties]\n" .
+            "class Router_Subdir_Test_Job {\n" .
+            "    public function perform() {\n" .
+            "        file_put_contents(\$this->args['marker'], getcwd());\n" .
+            "    }\n" .
+            "}\n"
+        );
+
+        putenv('APP_INCLUDE=./bootstrap.php');
+        putenv('RESQUE_ROUTER_SCRIPT_PATH=lib/vendor/bin/resque-run-job');
+
+        try {
+            $token = Resque::enqueue(
+                'router-test-jobs',
+                'Router_Subdir_Test_Job',
+                array('marker' => $marker),
+                true,
+                '',
+                $webPwd
+            );
+
+            $worker = new Resque_Worker('router-test-jobs');
+            $worker->setLogger($this->logger);
+            $worker->work(0);
+
+            $this->assertFileExists($marker);
+            $this->assertEquals($webPwd, trim(file_get_contents($marker)));
+
+            $status = new Resque_Job_Status($token);
+            $this->assertEquals(Resque_Job_Status::STATUS_COMPLETE, $status->get());
+        } finally {
+            putenv($originalRouterScriptPathEnv === false ? 'RESQUE_ROUTER_SCRIPT_PATH' : 'RESQUE_ROUTER_SCRIPT_PATH=' . $originalRouterScriptPathEnv);
+            putenv($originalAppIncludeEnv === false ? 'APP_INCLUDE' : 'APP_INCLUDE=' . $originalAppIncludeEnv);
+
+            @unlink($checkoutRoot . '/lib/vendor/bin/resque-run-job');
+            @unlink($checkoutRoot . '/lib/vendor/autoload.php');
+            @rmdir($checkoutRoot . '/lib/vendor/bin');
+            @rmdir($checkoutRoot . '/lib/vendor');
+            @rmdir($checkoutRoot . '/lib');
+            @unlink($webPwd . '/bootstrap.php');
+            @unlink($webPwd . '/marker.txt');
+            @rmdir($webPwd);
+            @rmdir($checkoutRoot);
+        }
+    }
 }

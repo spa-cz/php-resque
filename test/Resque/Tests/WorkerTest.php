@@ -303,15 +303,12 @@ class Resque_Tests_WorkerTest extends Resque_Tests_TestCase
     }
 
     protected $originalRouterEnabledEnv;
-    protected $originalRouterScriptPathEnv;
 
     public function setUp(): void
     {
         parent::setUp();
         $this->originalRouterEnabledEnv = getenv('RESQUE_ROUTER_ENABLED');
-        $this->originalRouterScriptPathEnv = getenv('RESQUE_ROUTER_SCRIPT_PATH');
         putenv('RESQUE_ROUTER_ENABLED');
-        putenv('RESQUE_ROUTER_SCRIPT_PATH');
     }
 
     public function tearDown(): void
@@ -320,12 +317,6 @@ class Resque_Tests_WorkerTest extends Resque_Tests_TestCase
             putenv('RESQUE_ROUTER_ENABLED');
         } else {
             putenv('RESQUE_ROUTER_ENABLED=' . $this->originalRouterEnabledEnv);
-        }
-
-        if ($this->originalRouterScriptPathEnv === false) {
-            putenv('RESQUE_ROUTER_SCRIPT_PATH');
-        } else {
-            putenv('RESQUE_ROUTER_SCRIPT_PATH=' . $this->originalRouterScriptPathEnv);
         }
     }
 
@@ -379,104 +370,4 @@ class Resque_Tests_WorkerTest extends Resque_Tests_TestCase
         $this->assertTrue($worker->shouldRouteJob($job));
     }
 
-    public function testResolveRouterScriptFindsDefaultVendorBinLocation()
-    {
-        $pwd = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
-        mkdir($pwd . '/vendor/bin', 0777, true);
-        touch($pwd . '/vendor/bin/resque-run-job');
-
-        $worker = new Resque_Worker('jobs');
-        $this->assertEquals($pwd . '/vendor/bin/resque-run-job', $worker->resolveRouterScript($pwd));
-
-        $this->rrmdir($pwd);
-    }
-
-    public function testResolveRouterScriptReturnsNullWhenNothingExists()
-    {
-        $pwd = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
-
-        $worker = new Resque_Worker('jobs');
-        $this->assertNull($worker->resolveRouterScript($pwd));
-    }
-
-    public function testResolveRouterScriptHonoursSingleCustomPath()
-    {
-        $pwd = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
-        mkdir($pwd . '/lib/vendor/bin', 0777, true);
-        touch($pwd . '/lib/vendor/bin/resque-run-job');
-
-        putenv('RESQUE_ROUTER_SCRIPT_PATH=lib/vendor/bin/resque-run-job');
-
-        $worker = new Resque_Worker('jobs');
-        $this->assertEquals($pwd . '/lib/vendor/bin/resque-run-job', $worker->resolveRouterScript($pwd));
-
-        $this->rrmdir($pwd);
-    }
-
-    /**
-     * Reproduces the reported bug: a single checkout enqueues jobs from two
-     * different entry points with two different working directories - a
-     * PHP-FPM request rooted one level below the checkout (in a "www/"
-     * subdirectory) and a CLI/cron script rooted at the checkout itself.
-     * A single static RESQUE_ROUTER_SCRIPT_PATH must resolve both, via the
-     * bounded upward walk trying each parent directory in turn.
-     */
-    public function testResolveRouterScriptWalksUpwardToFindCheckoutRoot()
-    {
-        $checkoutRoot = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
-        mkdir($checkoutRoot . '/www', 0777, true);
-        mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
-        touch($checkoutRoot . '/lib/vendor/bin/resque-run-job');
-
-        putenv('RESQUE_ROUTER_SCRIPT_PATH=lib/vendor/bin/resque-run-job');
-
-        $worker = new Resque_Worker('jobs');
-
-        // CLI/cron-style pwd: matches directly at the checkout root, no
-        // upward walk needed.
-        $this->assertEquals(
-            $checkoutRoot . '/lib/vendor/bin/resque-run-job',
-            $worker->resolveRouterScript($checkoutRoot)
-        );
-
-        // PHP-FPM-style pwd, one level below the checkout: doesn't exist
-        // directly under it, found one level up via the upward walk.
-        $this->assertEquals(
-            $checkoutRoot . '/www/../lib/vendor/bin/resque-run-job',
-            $worker->resolveRouterScript($checkoutRoot . '/www')
-        );
-
-        $this->rrmdir($checkoutRoot);
-    }
-
-    public function testResolveRouterScriptReturnsNullBeyondSearchDepth()
-    {
-        $checkoutRoot = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
-        $tooDeep = $checkoutRoot . str_repeat('/nested', Resque_Worker::MAX_ROUTER_SCRIPT_SEARCH_DEPTH + 1);
-        mkdir($tooDeep, 0777, true);
-        mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
-        touch($checkoutRoot . '/lib/vendor/bin/resque-run-job');
-
-        putenv('RESQUE_ROUTER_SCRIPT_PATH=lib/vendor/bin/resque-run-job');
-
-        $worker = new Resque_Worker('jobs');
-        $this->assertNull($worker->resolveRouterScript($tooDeep));
-
-        $this->rrmdir($checkoutRoot);
-    }
-
-    private function rrmdir($dir)
-    {
-        if (!is_dir($dir)) {
-            return;
-        }
-        foreach (scandir($dir) as $entry) {
-            if ($entry === '.' || $entry === '..') {
-                continue;
-            }
-            $path = $dir . '/' . $entry;
-            is_dir($path) ? $this->rrmdir($path) : unlink($path);
-        }
-        rmdir($dir);
-    }
 }

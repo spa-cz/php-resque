@@ -156,6 +156,142 @@ class Resque_Tests_JobTest extends Resque_Tests_TestCase
 		$this->assertEquals(getcwd(), $newJob->payload['pwd']);
 	}
 
+	public function testResolveCheckoutRootFindsDefaultVendorBinLocation()
+	{
+		$dir = realpath(sys_get_temp_dir()) . '/resque-resolve-test-' . uniqid();
+		mkdir($dir . '/vendor/bin', 0777, true);
+		touch($dir . '/vendor/bin/resque-run-job');
+
+		$this->assertEquals($dir, Resque_Job::resolveCheckoutRoot($dir));
+
+		$this->rrmdir($dir);
+	}
+
+	public function testResolveCheckoutRootReturnsNullWhenNothingExists()
+	{
+		$dir = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
+
+		$this->assertNull(Resque_Job::resolveCheckoutRoot($dir));
+	}
+
+	public function testResolveCheckoutRootHonoursCustomPath()
+	{
+		$dir = realpath(sys_get_temp_dir()) . '/resque-resolve-test-' . uniqid();
+		mkdir($dir . '/lib/vendor/bin', 0777, true);
+		touch($dir . '/lib/vendor/bin/resque-run-job');
+
+		$this->withRouterScriptPath('lib/vendor/bin/resque-run-job', function () use ($dir) {
+			$this->assertEquals($dir, Resque_Job::resolveCheckoutRoot($dir));
+		});
+
+		$this->rrmdir($dir);
+	}
+
+	/**
+	 * Reproduces the reported bug: a single checkout enqueues jobs from two
+	 * different entry points with two different working directories - a
+	 * PHP-FPM request rooted one level below the checkout (in a "www/"
+	 * subdirectory) and a CLI/cron script rooted at the checkout itself.
+	 * A single static RESQUE_ROUTER_SCRIPT_PATH must resolve both, via the
+	 * bounded upward walk trying each parent directory in turn - and,
+	 * crucially, both resolve to the SAME checkout root.
+	 */
+	public function testResolveCheckoutRootWalksUpwardToFindCheckoutRoot()
+	{
+		$checkoutRoot = realpath(sys_get_temp_dir()) . '/resque-resolve-test-' . uniqid();
+		mkdir($checkoutRoot . '/www', 0777, true);
+		mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
+		touch($checkoutRoot . '/lib/vendor/bin/resque-run-job');
+
+		$this->withRouterScriptPath('lib/vendor/bin/resque-run-job', function () use ($checkoutRoot) {
+			// CLI/cron-style dir: matches directly, no upward walk needed.
+			$this->assertEquals($checkoutRoot, Resque_Job::resolveCheckoutRoot($checkoutRoot));
+
+			// PHP-FPM-style dir, one level below the checkout: doesn't
+			// match directly, found one level up via the upward walk - and
+			// the "www/.." is normalized away to the same checkout root.
+			$this->assertEquals(
+				$checkoutRoot,
+				Resque_Job::resolveCheckoutRoot($checkoutRoot . '/www')
+			);
+		});
+
+		$this->rrmdir($checkoutRoot);
+	}
+
+	public function testResolveCheckoutRootReturnsNullBeyondSearchDepth()
+	{
+		$checkoutRoot = sys_get_temp_dir() . '/resque-resolve-test-' . uniqid();
+		$tooDeep = $checkoutRoot . str_repeat('/nested', Resque_Job::MAX_ROUTER_SCRIPT_SEARCH_DEPTH + 1);
+		mkdir($tooDeep, 0777, true);
+		mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
+		touch($checkoutRoot . '/lib/vendor/bin/resque-run-job');
+
+		$this->withRouterScriptPath('lib/vendor/bin/resque-run-job', function () use ($tooDeep) {
+			$this->assertNull(Resque_Job::resolveCheckoutRoot($tooDeep));
+		});
+
+		$this->rrmdir($checkoutRoot);
+	}
+
+	/**
+	 * End-to-end: Resque::enqueue() called with no explicit $pwd, from a
+	 * process whose cwd is a "www/" subdirectory of the checkout (simulating
+	 * a PHP-FPM request through /www/index.php), must store the checkout
+	 * ROOT as 'pwd' - not that subdirectory - so Resque_Worker::routeJobToPwd()
+	 * can trust it as-is at routing time.
+	 */
+	public function testEnqueueFromSubdirectoryResolvesToCheckoutRoot()
+	{
+		$checkoutRoot = realpath(sys_get_temp_dir()) . '/resque-resolve-test-' . uniqid();
+		$webDir = $checkoutRoot . '/www';
+		mkdir($webDir, 0777, true);
+		mkdir($checkoutRoot . '/lib/vendor/bin', 0777, true);
+		touch($checkoutRoot . '/lib/vendor/bin/resque-run-job');
+
+		$originalCwd = getcwd();
+
+		$this->withRouterScriptPath('lib/vendor/bin/resque-run-job', function () use ($checkoutRoot, $webDir, $originalCwd) {
+			try {
+				chdir($webDir);
+				Resque::enqueue('jobs', 'Test_Job');
+			} finally {
+				chdir($originalCwd);
+			}
+		});
+
+		$job = Resque_Job::reserve('jobs');
+		$this->assertEquals($checkoutRoot, $job->payload['pwd']);
+
+		$this->rrmdir($checkoutRoot);
+	}
+
+	private function withRouterScriptPath($value, $callback)
+	{
+		$original = getenv('RESQUE_ROUTER_SCRIPT_PATH');
+		putenv('RESQUE_ROUTER_SCRIPT_PATH=' . $value);
+		try {
+			$callback();
+		} finally {
+			putenv($original === false ? 'RESQUE_ROUTER_SCRIPT_PATH' : 'RESQUE_ROUTER_SCRIPT_PATH=' . $original);
+		}
+	}
+
+	private function rrmdir($dir)
+	{
+		if (!is_dir($dir)) {
+			return;
+		}
+		foreach (scandir($dir) as $entry) {
+			if ($entry === '.' || $entry === '..') {
+				continue;
+			}
+			$path = $dir . '/' . $entry;
+			is_dir($path) ? $this->rrmdir($path) : unlink($path);
+		}
+		rmdir($dir);
+	}
+
 	public function testFailedJobExceptionsAreCaught()
 	{
 		$payload = array(

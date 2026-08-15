@@ -55,9 +55,14 @@ class Resque_Job
 	 * @param boolean $monitor Set to true to be able to monitor the status of a job.
 	 * @param string $id Unique identifier for tracking the job. Generated if not supplied.
 	 * @param string $prefix The prefix needs to be set for the status key
-	 * @param string|null $pwd The filesystem root that is enqueuing this job (defaults
-	 *        to getcwd()); a router pool re-executes the job in a process rooted here
-	 *        if it differs from the pool's own cwd.
+	 * @param string|null $pwd The filesystem root that is enqueuing this job. If not
+	 *        supplied, defaults to resolveCheckoutRoot(getcwd()) - the checkout root
+	 *        found by walking upward from getcwd(), so callers enqueuing from a
+	 *        subdirectory of the checkout (e.g. a PHP-FPM request rooted in "www/")
+	 *        still get the checkout root stored, not that subdirectory - falling back
+	 *        to plain getcwd() if no checkout root can be found. A router pool
+	 *        re-executes the job in a process rooted here if it differs from the
+	 *        pool's own cwd.
 	 *
 	 * @return string
 	 * @throws \InvalidArgumentException
@@ -75,7 +80,11 @@ class Resque_Job
 		}
 
 		if ($pwd === null) {
-			$pwd = getcwd();
+			$cwd = getcwd();
+			$pwd = self::resolveCheckoutRoot($cwd);
+			if ($pwd === null) {
+				$pwd = $cwd;
+			}
 		}
 
 		Resque::push($queue, array(
@@ -334,6 +343,63 @@ class Resque_Job
 	{
 		if (isset($this->payload['pwd'])) {
 			return $this->payload['pwd'];
+		}
+
+		return null;
+	}
+
+	/**
+	 * How many parent directories above $startDir to try, in addition to
+	 * $startDir itself, when searching for the router script - see
+	 * resolveCheckoutRoot(). A single checkout can be enqueued into from
+	 * entry points with different working directories (e.g. a PHP-FPM
+	 * request rooted in a "www/" subdirectory of the checkout vs. a
+	 * CLI/cron script rooted at the checkout itself); this bounded upward
+	 * walk finds the checkout root without needing every such convention
+	 * enumerated explicitly. Kept small and fixed - same spirit as
+	 * bin/resque's own handful of hardcoded Composer-autoload candidates -
+	 * rather than an unbounded walk, so a misconfigured RESQUE_ROUTER_SCRIPT_PATH
+	 * still fails to resolve (falling back to plain getcwd(), see create())
+	 * instead of silently matching an unrelated ancestor directory.
+	 */
+	const MAX_ROUTER_SCRIPT_SEARCH_DEPTH = 3;
+
+	/**
+	 * Find the checkout root by walking upward from $startDir, looking for
+	 * the router script (RESQUE_ROUTER_SCRIPT_PATH, default
+	 * 'vendor/bin/resque-run-job' - the standard Composer bin-dir location)
+	 * at $startDir itself, then at each of up to
+	 * MAX_ROUTER_SCRIPT_SEARCH_DEPTH parent directories above it. Returns
+	 * the first ancestor (including $startDir) where it's found, or null if
+	 * none match within the search depth.
+	 *
+	 * This resolves the checkout root once, at job-creation time, so
+	 * Resque_Worker::routeJobToPwd() can trust the stored 'pwd' as-is and
+	 * doesn't need to repeat this search on every route.
+	 *
+	 * Pure filesystem check - safe to call directly in tests.
+	 *
+	 * @param string $startDir
+	 * @return string|null
+	 */
+	public static function resolveCheckoutRoot($startDir)
+	{
+		$relative = getenv('RESQUE_ROUTER_SCRIPT_PATH');
+		if ($relative === false || $relative === '') {
+			$relative = 'vendor/bin/resque-run-job';
+		}
+
+		$startDir = rtrim($startDir, '/');
+
+		for ($levelsUp = 0; $levelsUp <= self::MAX_ROUTER_SCRIPT_SEARCH_DEPTH; $levelsUp++) {
+			$candidateRoot = $startDir . str_repeat('/..', $levelsUp);
+			if (file_exists($candidateRoot . '/' . $relative)) {
+				// Normalize away the embedded "/.." segments before storing/
+				// returning this - it ends up logged and persisted in Redis
+				// job payloads, so it should read as a clean, canonical path.
+				$realCandidateRoot = realpath($candidateRoot);
+				return $realCandidateRoot !== false ? $realCandidateRoot : $candidateRoot;
+			}
 		}
 
 		return null;
